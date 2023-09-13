@@ -39,6 +39,12 @@
     <ClCompile Include="getTargetPosition.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="shape_match.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="shape_match_main.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="myStitcher.h">
@@ -54,6 +60,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="getTargetPosition.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="shape_match.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

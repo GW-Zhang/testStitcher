@@ -209,6 +209,8 @@ cv::Mat getTargetPosition::eliminate_background(cv::Mat target, cv::Mat mask,  d
 //连通域分析，将干扰情况过滤掉，只保留目标图像
 cv::Mat getTargetPosition::setTarget(cv::Mat &filledImg, double  areaThre)
 {
+	cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+	cv::erode(filledImg, filledImg, element, cv::Point(-1, -1), 3);
 	//连通域分析，去掉干扰情况
 	cv::Mat labels, stats, centroids;
 	int numLabels = cv::connectedComponentsWithStats(filledImg, labels, stats, centroids);
@@ -223,6 +225,10 @@ cv::Mat getTargetPosition::setTarget(cv::Mat &filledImg, double  areaThre)
 			targetImg.setTo(255, tmp);
 		}
 	}
+
+	//腐蚀操作，去掉边界干扰情况
+	//cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+	cv::erode(targetImg, targetImg, element, cv::Point(-1, -1), 3);
 	return targetImg;
 }
 
@@ -242,32 +248,33 @@ cv::Mat getTargetPosition::calcuDist(cv::Mat &targetImg, double distThre)
 }
 
 //利用角点检测方法对近地距离图像进行检测角点
-cv::Mat getTargetPosition::detectCorner(cv::Mat &distImg,double blockSize,double ksize)
+cv::Mat getTargetPosition::detectCorner(cv::Mat &distImg,double blockSize,double ksize, double cornerRatio)
 {
 	cv::Mat corners;
 	cv::cornerHarris(distImg, corners, 2, ksize, 0.04);
 
+	//角点过滤
+	double maxVal = 0.0;
+	cv::minMaxLoc(corners, nullptr, &maxVal);
+	double threshold = cornerRatio *maxVal;
+	cv::Mat cornersThreshold;
+	cv::threshold(corners, cornersThreshold, threshold, 255, cv::THRESH_TOZERO);
+
 	// 归一化响应值
 	cv::Mat normalizedCorners;
-	cv::normalize(corners, normalizedCorners, 0, 255, cv::NORM_MINMAX, CV_32FC1, cv::Mat());
+	cv::normalize(cornersThreshold, normalizedCorners, 0, 255, cv::NORM_MINMAX, CV_32FC1, cv::Mat());
 
 	cv::convertScaleAbs(normalizedCorners, normalizedCorners);
+
+	//画出角点
 	cv::Mat drawCorner = distImg.clone();
 	cv::cvtColor(drawCorner, drawCorner, COLOR_GRAY2BGR);
 	cv::Mat drawCorner_01 = drawCorner.clone();
 
-		//// 绘制角点
-	//double minVal, maxVal;
-	//cv::minMaxLoc(corners, &minVal, &maxVal);
-	//// 使用最大值进行阈值设置
-	//float threshold = 0.03;
-	//float thresholdValue = threshold * maxVal;
-	//
-	//cv::Mat cornerImage;
-	//cv::cvtColor(distImg, cornerImage, cv::COLOR_GRAY2BGR);
+		// 绘制角点
 	for (int y = 0; y < normalizedCorners.rows; y++) {
 		for (int x = 0; x < normalizedCorners.cols; x++) {
-			if (normalizedCorners.at<uchar>(y, x) > 90) {
+			if (normalizedCorners.at<uchar>(y, x) > 0) {
 				cv::circle(drawCorner, cv::Point(x, y), 3, cv::Scalar(0, 0, 255), 2, 1, 0);
 			}
 		}
@@ -278,7 +285,7 @@ cv::Mat getTargetPosition::detectCorner(cv::Mat &distImg,double blockSize,double
 }
 
 //非极大值抑制方法对角点进行筛选
-std::vector<NMS::CornerPoint> getTargetPosition::NMSCornerPoint(cv::Mat &normalizedCorners, double cornerThre, double nmsThre)
+std::vector<NMS::CornerPoint> getTargetPosition::NMSCornerPoint(cv::Mat &normalizedCorners, double nmsThre)
 {
 	//非极大值抑制过滤角点
 	std::vector<NMS::CornerPoint>vCorPoints;
@@ -288,7 +295,7 @@ std::vector<NMS::CornerPoint> getTargetPosition::NMSCornerPoint(cv::Mat &normali
 		for (int c = 0; c < normalizedCorners.cols; c++)
 		{
 			//设置阈值按照角点响应值对角点进行过滤
-			if (normalizedCorners_ptr[c] > 90)
+			if (normalizedCorners_ptr[c] > 0)
 			{
 				NMS::CornerPoint CorPoint;
 				CorPoint.location = cv::Point2f(c, r);
@@ -388,7 +395,7 @@ std::vector<C_Info> getTargetPosition::getCornerCenter(cv::Mat &distImg, std::ve
 
 	//计算目标的面积
 	double wholeArea = static_cast<double>(cv::countNonZero(distImg));
-	double erodeArea = wholeArea / 4;
+	double erodeArea = wholeArea / 2;
 	cv::Mat singleDist = distImg.clone();
 	while (wholeArea > erodeArea)
 	{	
@@ -397,12 +404,15 @@ std::vector<C_Info> getTargetPosition::getCornerCenter(cv::Mat &distImg, std::ve
 		//计算前景图像的面积
 		wholeArea = static_cast<double>(cv::countNonZero(singleDist));
 	}
+	//cv::Mat drawImg = singleDist;
+	//cv::cvtColor(drawImg, drawImg, COLOR_GRAY2BGR);
 	//计算角点离前景区域最近的点
 	std::vector<C_Info> vC_infos;
 	for (int i = 0; i < filteredCornerPoints.size(); i++)
 	{
 		//计算背景上某点到前景边缘上距离最近的点
 		cv::Point center = calcuMinDist_of_edge(filteredCornerPoints[i].location, singleDist);
+		//circle(drawImg, center, 2, cv::Scalar(0, 0, 255), -1, 8);
 		C_Info c_info;
 		c_info.centerPt = center;
 		c_info.centerScore = filteredCornerPoints[i].response;
@@ -471,6 +481,66 @@ void getTargetPosition::drawTargetInfo(cv::Mat &drawImg,std::vector<C_Info>vC_in
 	}
 }
 
+//霍夫直线检测
+void getTargetPosition::hough_detect_line(cv::Mat &image,cv::Mat mask,cv::Mat filledImg)
+{
+	// 寻找轮廓
+	std::vector<std::vector<cv::Point>> contours;
+	std::vector<cv::Vec4i> hierarchy;
+	cv::findContours(filledImg, contours, hierarchy, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+	// 创建绘制轮廓的空白图像
+	cv::Mat contourImage = cv::Mat::zeros(filledImg.size(), CV_8UC3);
+
+	// 绘制轮廓
+	for (size_t i = 0; i < contours.size(); i++)
+	{
+		cv::Scalar color = cv::Scalar(255, 0, 255); // 蓝色
+		cv::drawContours(contourImage, contours, static_cast<int>(i), color, 2, cv::LINE_8, hierarchy);
+	}
+
+	cv::Mat blurImg,blurMask,subImg;
+	//blur(image, blurImg, cv::Size(9, 9));
+	//cv::medianBlur(image, blurImg, 5);
+	//cv::medianBlur(mask, blurMask, 5);
+	cv::absdiff(image, mask, subImg);
+	//cv::blur(subImg, subImg, cv::Size(5, 5));
+	cv::medianBlur(subImg, subImg, 15);
+
+	cv::Mat binImg;
+	cv::threshold(subImg, binImg, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+	//对二进制图像进行边界平滑处理，使用形态学操作
+	cv::bitwise_not(binImg, binImg, cv::Mat());
+	cv::Mat openImg;
+	cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+	cv::morphologyEx(binImg, openImg, cv::MORPH_OPEN, element, cv::Point(-1, -1), 1);
+	cv::Mat edge;
+	cv::Canny(openImg, edge, 30,90);		//边缘检测
+
+	std::vector<cv::Vec2f> lines;		//存储检测到的直线
+
+	//霍夫直线检测
+	cv::HoughLines(edge, lines, 1, CV_PI / 180, 80);
+
+	//直线抑制
+
+
+	// 在图像上绘制检测到的直线
+	cv::Mat drawImg = edge.clone();
+	cv::cvtColor(drawImg, drawImg, COLOR_GRAY2BGR);
+	for (size_t i = 0; i < lines.size(); i++) {
+		float rho = lines[i][0];
+		float theta = lines[i][1];
+		double a = std::cos(theta);
+		double b = std::sin(theta);
+		double x0 = a * rho;
+		double y0 = b * rho;
+		cv::Point pt1(cvRound(x0 + 1000 * (-b)), cvRound(y0 + 1000 * (a)));
+		cv::Point pt2(cvRound(x0 - 1000 * (-b)), cvRound(y0 - 1000 * (a)));
+		cv::line(contourImage, pt1, pt2, cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
+	}
+}
+
 
 void getTargetPosition::targetPosition(cv::Mat& img, cv::Mat& toMaskImg, double* fParams,
 	std::vector<cv::Point>& vTargetPos, cv::Mat& drawImg)
@@ -514,7 +584,7 @@ void getTargetPosition::targetPosition(cv::Mat& img, cv::Mat& toMaskImg, double*
 	cv::Mat targetImg = setTarget(filterImg, fParams[1]);
 
 	//计算目标图像的近地距离
-	cv::Mat distImg = calcuDist(targetImg, 70);//fParams[3]  近地距离的阈值
+	cv::Mat distImg = calcuDist(targetImg, fParams[4]);//fParams[4]  近地距离的阈值
 
 	//利用角点检测方法对近地距离图像进行检测角点
 	std::vector<cv::Mat>vSingleDistImgs;
@@ -527,7 +597,7 @@ void getTargetPosition::targetPosition(cv::Mat& img, cv::Mat& toMaskImg, double*
 		//cv::Mat targetImg;
 		//targetImg.setTo(255, tmp);
 		vSingleDistImgs.push_back(tmp);
-		cv::Mat cornerImg = detectCorner(tmp, 9, 3);
+		cv::Mat cornerImg = detectCorner(tmp, fParams[5], 3, fParams[6]);		//fParams[5],fParams[6]  计算角点所需要的blocksize和卷积核尺寸
 		vSingleCornerImgs.push_back(cornerImg);
 	}
 	
@@ -535,49 +605,52 @@ void getTargetPosition::targetPosition(cv::Mat& img, cv::Mat& toMaskImg, double*
 	//非极大值抑制过滤角点
 	//根据角点获取近地距离的中心位置
 	std::vector<std::vector<C_Info>>vC_Infos;
+	std::vector<C_Info> vC_result_infos;		//存储最终的定位信息
+	cv::Mat drawCorner_01 = distImg.clone();
+	cv::cvtColor(drawCorner_01, drawCorner_01, COLOR_GRAY2BGR);
 	for (int i = 0; i < vSingleCornerImgs.size(); i++)
 	{
 		std::vector<C_Info>vC_infos;
-		std::vector<NMS::CornerPoint> filteredCornerPoints = NMSCornerPoint(vSingleCornerImgs[i], 90, 80);
-		////将抑制后的角点在图像上进行画出
-		//cv::Mat drawCorner_01=cornerImg.clone();
-		//for (int i = 0; i < filteredCorPoints.size(); i++)
+		std::vector<NMS::CornerPoint> filteredCornerPoints = NMSCornerPoint(vSingleCornerImgs[i],  fParams[7]);	//fParams[7],fParams[8] 对角点进行过滤的阈值，以及非极大值抑制的半径
+		//将抑制后的角点在图像上进行画出
+
+		//for (int i = 0; i < filteredCornerPoints.size(); i++)
 		//{
-		//	cv::circle(drawCorner_01, filteredCorPoints[i].location, 3, cv::Scalar(0, 0, 255), 2, 1, 0);
+		//	cv::circle(drawCorner_01, filteredCornerPoints[i].location, 3, cv::Scalar(0, 0, 255), 2, 1, 0);
 		//}
 
 		//根据角点获取近地距离的中心位置
 		vC_infos=getCornerCenter(vSingleDistImgs[i], filteredCornerPoints);
-		vC_Infos.push_back(vC_infos);
+		if (vC_infos.size() == 1)
+		{
+			vC_result_infos.push_back(vC_infos[0]);
+		}
+		else
+		{
+			vC_Infos.push_back(vC_infos);
+		}
+		
 	}
 
 	//对中心点位置按照角点响应强度进行排序，获取最终的抓取顺序
 	std::vector<C_Info> vC_infos = getSortCenter(vC_Infos);
 	for (int i = 0; i < vC_infos.size(); i++)
 	{
-		vTargetPos.push_back(vC_infos[i].centerPt);
+		vC_result_infos.push_back(vC_infos[i]);
+		
+	}
+
+	//存储目标的中心点坐标
+	for (int i = 0; i < vC_result_infos.size(); i++)
+	{
+		vTargetPos.push_back(vC_result_infos[i].centerPt);
 	}
 
 	//在原图像上画出中心位置并根据点信息强度进行标号
-	drawTargetInfo(drawImg, vC_infos);
+	drawTargetInfo(drawImg, vC_result_infos);
 
-	
-	////获取目标的区域图
-	//std::vector<cv::Mat>vTargetImg= connect_get_target(filterImg, fParams[1], fParams[2]);
-
-	////获取目标的中心位置
-	////std::vector<cv::Point>vCenterPt;
-	//for (int i = 0; i < vTargetImg.size(); i++)
-	//{
-	//	cv::Point center= getCenter(vTargetImg[i]);
-	//	vTargetPos.push_back(center);
-	//}
-
-	////在图像上将中心位置画出来
-	//for (int i = 0; i < vTargetPos.size(); i++)
-	//{
-	//	cv::circle(drawImg, vTargetPos[i], 5, cv::Scalar(0, 0, 255), -1);
-	//}
+	////检测直线
+	hough_detect_line(grayImg,grayMask, targetImg);
 
 	////将结果转换回去
 	//if (drawIplImg)
@@ -585,48 +658,48 @@ void getTargetPosition::targetPosition(cv::Mat& img, cv::Mat& toMaskImg, double*
 	//	cvCopy(&(IplImage)drawImg, drawIplImg);
 	//}
 }
-
-int main()
-{
-	string pattern_img = "test\\断包定位\\断包定位1\\不合格\\0";
-	std::vector<std::string>vFiles;
-	cv::glob(pattern_img, vFiles, false);
-	if (vFiles.size() == 0) {
-		cout << "the input data is null" << endl;
-		return 2;
-	}
-
-	else {
-
-		//选取mask图像
-		double fParams[4] = { 400,4000,10000,1 };
-		cv::Mat maskImg = cv::imread(vFiles.at(1));
-
-		//对区域进行切割，只处理中间区域
-		cv::Rect rect = cv::Rect(maskImg.cols / 4, 0, maskImg.cols / 2, maskImg.rows);
-		cv::Mat rectMaskImg = maskImg(rect);
-
-		for (int i = 51; i < vFiles.size(); i++)
-		{
-			//参数：原来存储中心位置
-			std::vector<cv::Point>vCenterPt;
-
-			//读入图像
-			cv::Mat inputImg = cv::imread(vFiles.at(i));
-			cv::Mat drawImg = inputImg.clone();
-
-			//对区域进行切割，只处理中间区域
-			cv::Rect rect = cv::Rect(inputImg.cols / 4, 0, inputImg.cols / 2, inputImg.rows);
-			cv::Mat rectImg = inputImg(rect);
-			cv::Mat rectDrawImg = drawImg(rect);
-			////分水岭方法分割目标
-			//waterThresh(rectImg,400,mask,4000);
-			//连通域分析方法获取目标位置
-			getTargetPosition getTP;
-			getTP.targetPosition(rectImg, rectMaskImg,fParams, vCenterPt, rectDrawImg);
-
-		}
-	}
-	system("pause");
-	return 0;
-}
+//
+//int main()
+//{
+//	string pattern_img = "test\\断包定位\\断包定位1\\不合格\\0";
+//	std::vector<std::string>vFiles;
+//	cv::glob(pattern_img, vFiles, false);
+//	if (vFiles.size() == 0) {
+//		cout << "the input data is null" << endl;
+//		return 2;
+//	}
+//
+//	else {
+//
+//		//选取mask图像
+//		double fParams[8] = { 400,4000,10000,1,70,2,0.1,80 };
+//		cv::Mat maskImg = cv::imread(vFiles.at(1));
+//
+//		//对区域进行切割，只处理中间区域
+//		cv::Rect rect = cv::Rect(maskImg.cols / 4, 0, maskImg.cols / 2, maskImg.rows);
+//		cv::Mat rectMaskImg = maskImg(rect);
+//
+//		for (int i = 13; i < vFiles.size(); i++)
+//		{
+//			//参数：原来存储中心位置
+//			std::vector<cv::Point>vCenterPt;
+//
+//			//读入图像
+//			cv::Mat inputImg = cv::imread(vFiles.at(i));
+//			cv::Mat drawImg = inputImg.clone();
+//
+//			//对区域进行切割，只处理中间区域
+//			cv::Rect rect = cv::Rect(inputImg.cols / 4, 0, inputImg.cols / 2, inputImg.rows);
+//			cv::Mat rectImg = inputImg(rect);
+//			cv::Mat rectDrawImg = drawImg(rect);
+//			////分水岭方法分割目标
+//			//waterThresh(rectImg,400,mask,4000);
+//			//连通域分析方法获取目标位置
+//			getTargetPosition getTP;
+//			getTP.targetPosition(rectImg, rectMaskImg,fParams, vCenterPt, rectDrawImg);
+//
+//		}
+//	}
+//	system("pause");
+//	return 0;
+//}
